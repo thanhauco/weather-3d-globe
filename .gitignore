@@ -1,0 +1,9 @@
+node_modules
+.next
+out
+build
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
+# keep .env.local for local dev convenience; do not commit real secrets
+.env*.local.bak
