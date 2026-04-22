@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#__next {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: radial-gradient(ellipse at 50% 30%, #0a1530 0%, #05070f 60%, #02030a 100%);
+  color: #e2e8f0;
+  overflow: hidden;
+}
+
+/* Time-travel slider styling */
+input[type="range"].timeslider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+input[type="range"].timeslider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #38bdf8;
+  border: 3px solid #e0f2fe;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
+  cursor: pointer;
+}
+input[type="range"].timeslider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #38bdf8;
+  border: 3px solid #e0f2fe;
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.8);
+  cursor: pointer;
+}
+
+.glass {
+  background: rgba(11, 18, 32, 0.72);
+  backdrop-filter: blur(14px);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+}
