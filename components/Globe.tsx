@@ -35,6 +35,7 @@ interface GlobeProps {
   stormMode: boolean;
   selectedStorm: StormSummary | null;
   stormTrack: StormTrack | null;
+  windMode: boolean;
 }
 
 // Initial camera distance so the globe fills ~70% of the viewport height.
@@ -51,6 +52,7 @@ export default function Globe({
   stormMode,
   selectedStorm,
   stormTrack,
+  windMode,
 }: GlobeProps) {
   const controlsRef = useRef<any>(null);
   return (
@@ -66,11 +68,12 @@ export default function Globe({
         <Earth at={at} />
         <Clouds at={at} />
         <Atmosphere />
+        {windMode && <WindField cities={cities} />}
         {!focusPlace && !stormMode && !selectedStorm && (
           <Markers cities={cities} selectedId={selectedId} onSelect={onSelect} />
         )}
         <FocusPin place={focusPlace} at={at} />
-        <StormVisuals stormTrack={stormTrack} />
+        <StormVisuals stormTrack={stormTrack} at={at} />
       </Suspense>
       <CameraRig focus={focus} controlsRef={controlsRef} />
       <OrbitControls
@@ -334,6 +337,122 @@ function Atmosphere() {
   );
 }
 
+// Synthetic-but-plausible global wind field: prevailing zonal winds (tropical
+// easterlies, mid-latitude westerlies, polar easterlies) with a gentle
+// meridional wobble. Local speed is biased by nearby city observations so the
+// flow reacts to the live data. Returns degrees/second [dLon, dLat].
+function windVector(
+  lat: number,
+  lon: number,
+  speedScale: number
+): [number, number] {
+  const rad = Math.PI / 180;
+  // Base zonal direction by latitude band (+east / -west).
+  let zonal: number;
+  const a = Math.abs(lat);
+  if (a < 30) zonal = -1; // trade winds → west
+  else if (a < 60) zonal = 1; // westerlies → east
+  else zonal = -0.7; // polar easterlies → west
+  // Smooth the band transitions and taper toward the poles.
+  zonal *= Math.cos(lat * rad);
+  // Meridional wobble produces swirling, less robotic streamlines.
+  const merid =
+    0.35 * Math.sin(lon * 2 * rad + lat * rad) * Math.cos(lat * 1.5 * rad);
+  const k = 9 * speedScale;
+  return [zonal * k, merid * k];
+}
+
+// Animated wind-flow particle layer. Particles drift along the wind field and
+// respawn when they age out, producing flowing streaklines over the globe.
+function WindField({ cities }: { cities: CitySnapshot[] }) {
+  const COUNT = 1400;
+  const pointsRef = useRef<THREE.Points>(null);
+
+  // Average observed wind to scale the whole field's liveliness.
+  const speedScale = useMemo(() => {
+    if (!cities.length) return 1;
+    const avg =
+      cities.reduce((s, c) => s + (c.wind_kph || 0), 0) / cities.length;
+    return Math.min(1.8, Math.max(0.5, avg / 18));
+  }, [cities]);
+
+  // Per-particle lat/lon/age, plus the GPU position + color buffers.
+  const state = useMemo(() => {
+    const lat = new Float32Array(COUNT);
+    const lon = new Float32Array(COUNT);
+    const age = new Float32Array(COUNT);
+    const positions = new Float32Array(COUNT * 3);
+    const colors = new Float32Array(COUNT * 3);
+    for (let i = 0; i < COUNT; i++) {
+      lat[i] = Math.asin(2 * Math.random() - 1) * (180 / Math.PI);
+      lon[i] = Math.random() * 360 - 180;
+      age[i] = Math.random() * 3;
+    }
+    return { lat, lon, age, positions, colors };
+  }, []);
+
+  const geometry = useMemo(() => {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(state.positions, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(state.colors, 3));
+    return g;
+  }, [state]);
+
+  const material = useMemo(
+    () =>
+      new THREE.PointsMaterial({
+        size: 0.018,
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    []
+  );
+
+  useFrame((_, rawDelta) => {
+    const delta = Math.min(rawDelta, 0.05);
+    const { lat, lon, age, positions, colors } = state;
+    for (let i = 0; i < COUNT; i++) {
+      age[i] += delta;
+      if (age[i] > 3.2) {
+        // Respawn somewhere fresh to keep coverage even.
+        lat[i] = Math.asin(2 * Math.random() - 1) * (180 / Math.PI);
+        lon[i] = Math.random() * 360 - 180;
+        age[i] = 0;
+      }
+      const [dLon, dLat] = windVector(lat[i], lon[i], speedScale);
+      // Convert eastward deg/s to lon deg/s (compress near the poles).
+      const cosLat = Math.max(0.2, Math.cos(lat[i] * (Math.PI / 180)));
+      lon[i] += (dLon / cosLat) * delta;
+      lat[i] += dLat * delta;
+      if (lon[i] > 180) lon[i] -= 360;
+      if (lon[i] < -180) lon[i] += 360;
+      if (lat[i] > 89) lat[i] = 89;
+      if (lat[i] < -89) lat[i] = -89;
+
+      const v = latLonToVec3(lat[i], lon[i], R * 1.02);
+      positions[i * 3] = v.x;
+      positions[i * 3 + 1] = v.y;
+      positions[i * 3 + 2] = v.z;
+
+      // Fade in then out over the particle lifetime.
+      const life = age[i] / 3.2;
+      const fade = Math.sin(life * Math.PI);
+      const speed = Math.hypot(dLon, dLat) / (9 * speedScale);
+      // Cyan (slow) → white (fast), brightened by fade.
+      colors[i * 3] = (0.4 + 0.6 * speed) * fade;
+      colors[i * 3 + 1] = (0.8 + 0.2 * speed) * fade;
+      colors[i * 3 + 2] = fade;
+    }
+    geometry.attributes.position.needsUpdate = true;
+    geometry.attributes.color.needsUpdate = true;
+  });
+
+  return <points ref={pointsRef} geometry={geometry} material={material} />;
+}
+
 function Markers({
   cities,
   selectedId,
@@ -543,8 +662,42 @@ function FocusPin({ place, at }: { place: PlaceSnapshot | null; at: Date }) {
   );
 }
 
+// Interpolate a storm's position along its track at an arbitrary instant so a
+// playhead can ride the path in sync with the time slider. Returns null when
+// the requested time is outside the track's observed/forecast window.
+function interpStormPos(
+  track: StormTrack,
+  at: Date
+): { lat: number; lon: number; forecast: boolean } | null {
+  const pts = track.points;
+  if (pts.length === 0) return null;
+  const t = at.getTime();
+  const times = pts.map((p) => new Date(p.time).getTime());
+  if (t <= times[0]) return null;
+  if (t >= times[times.length - 1]) return null;
+  for (let i = 1; i < pts.length; i++) {
+    if (t <= times[i]) {
+      const span = times[i] - times[i - 1] || 1;
+      const f = (t - times[i - 1]) / span;
+      // Shortest-path longitude interpolation across the antimeridian.
+      let dLon = pts[i].lon - pts[i - 1].lon;
+      if (dLon > 180) dLon -= 360;
+      if (dLon < -180) dLon += 360;
+      let lon = pts[i - 1].lon + dLon * f;
+      if (lon > 180) lon -= 360;
+      if (lon < -180) lon += 360;
+      return {
+        lat: pts[i - 1].lat + (pts[i].lat - pts[i - 1].lat) * f,
+        lon,
+        forecast: pts[i].forecast,
+      };
+    }
+  }
+  return null;
+}
+
 // Render storm tracks, uncertainty forecast cones & the active cyclone pin.
-function StormVisuals({ stormTrack }: { stormTrack: StormTrack | null }) {
+function StormVisuals({ stormTrack, at }: { stormTrack: StormTrack | null; at: Date }) {
   if (!stormTrack || stormTrack.points.length === 0) return null;
 
   // Split points into historical/observed track vs forecast track
@@ -578,6 +731,12 @@ function StormVisuals({ stormTrack }: { stormTrack: StormTrack | null }) {
   // Current live position coordinate
   const currentPos = stormTrack.current
     ? latLonToVec3(stormTrack.current.lat, stormTrack.current.lon, R * 1.015)
+    : null;
+
+  // Time-slider playhead riding the track.
+  const playhead = interpStormPos(stormTrack, at);
+  const playheadPos = playhead
+    ? latLonToVec3(playhead.lat, playhead.lon, R * 1.016)
     : null;
 
   return (
@@ -632,6 +791,31 @@ function StormVisuals({ stormTrack }: { stormTrack: StormTrack | null }) {
                 <span className="uppercase tracking-wider">{stormTrack.name}</span>
                 <span className="text-slate-300 font-normal">|</span>
                 <span className="text-amber-300">{stormTrack.maxWindKph} km/h</span>
+              </div>
+            </div>
+          </Html>
+        </group>
+      )}
+
+      {/* 5. Time-slider playhead riding the track in sync with the clock */}
+      {playheadPos && (
+        <group position={[playheadPos.x, playheadPos.y, playheadPos.z]}>
+          <mesh>
+            <sphereGeometry args={[0.009, 16, 16]} />
+            <meshBasicMaterial color="#ffffff" />
+          </mesh>
+          <StormRing color={playhead?.forecast ? color : "#e2e8f0"} />
+          <Html center zIndexRange={[88, 68]}>
+            <div className="pointer-events-none -translate-y-[150%]">
+              <div
+                className="rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider leading-none shadow-lg border"
+                style={{
+                  background: "rgba(10,15,30,0.92)",
+                  borderColor: playhead?.forecast ? color : "#e2e8f0",
+                  color: "#ffffff",
+                }}
+              >
+                {playhead?.forecast ? "forecast" : "observed"}
               </div>
             </div>
           </Html>

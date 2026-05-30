@@ -52,11 +52,16 @@ export default function Dashboard() {
   const [selectedStorm, setSelectedStorm] = useState<StormSummary | null>(null);
   const [stormTrack, setStormTrack] = useState<StormTrack | null>(null);
 
+  // Wind-flow overlay + shareable-link UI state
+  const [windMode, setWindMode] = useState(false);
+  const [copied, setCopied] = useState(false);
+
   const fetchSeq = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const placeSeq = useRef(0);
   const focusRef = useRef<GeocodeResult | null>(null);
   const autoLocatedRef = useRef(false);
+  const urlRestoredRef = useRef(false);
 
   // Load metadata / time window once.
   useEffect(() => {
@@ -93,6 +98,27 @@ export default function Dashboard() {
     if (meta) loadSnapshot(value);
   }, [value, meta, loadSnapshot]);
 
+  // Keep the browser URL in sync with the current view so it can be shared.
+  useEffect(() => {
+    if (!meta || !urlRestoredRef.current || typeof window === "undefined") return;
+    const p = new URLSearchParams();
+    p.set("t", new Date(value).toISOString());
+    if (windMode) p.set("wind", "1");
+    if (place) {
+      p.set("lat", place.lat.toFixed(4));
+      p.set("lon", place.lon.toFixed(4));
+      if (place.name) p.set("name", place.name);
+      if (place.country) p.set("country", place.country);
+      if (place.admin1) p.set("admin1", place.admin1);
+    } else if (stormView) {
+      p.set("storm", "1");
+    } else if (selectedId != null) {
+      p.set("city", String(selectedId));
+    }
+    const next = `${window.location.pathname}?${p.toString()}`;
+    window.history.replaceState(null, "", next);
+  }, [meta, value, windMode, place, stormView, selectedId]);
+
   // Fetch synthetic live weather for the focused place at the current instant.
   const loadPlace = useCallback((g: GeocodeResult, t: number) => {
     const seq = ++placeSeq.current;
@@ -113,6 +139,48 @@ export default function Dashboard() {
         /* keep previous */
       });
   }, []);
+
+  // Restore view from shareable URL params (runs once, after meta is ready).
+  useEffect(() => {
+    if (!meta || urlRestoredRef.current) return;
+    urlRestoredRef.current = true;
+    if (typeof window === "undefined") return;
+    const p = new URLSearchParams(window.location.search);
+
+    const t = p.get("t");
+    if (t) {
+      const ms = Date.parse(t);
+      if (!Number.isNaN(ms)) {
+        const min = new Date(meta.minTime).getTime();
+        const max = new Date(meta.maxTime).getTime();
+        setValue(Math.min(max, Math.max(min, ms)));
+      }
+    }
+    if (p.get("wind") === "1") setWindMode(true);
+
+    const lat = parseFloat(p.get("lat") || "");
+    const lon = parseFloat(p.get("lon") || "");
+    if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
+      const g: GeocodeResult = {
+        id: 0,
+        name: p.get("name") || "Pinned location",
+        country: p.get("country") || "",
+        admin1: p.get("admin1") || "",
+        lat,
+        lon,
+      };
+      autoLocatedRef.current = true; // don't let IP geolocation override a link
+      focusRef.current = g;
+      setFocus({ lat, lon, distance: 2.6 });
+      setAutoRotate(false);
+      loadPlace(g, t ? Date.parse(t) : new Date(meta.now).getTime());
+    } else if (p.get("storm") === "1") {
+      setStormView(true);
+    } else {
+      const cityId = parseInt(p.get("city") || "", 10);
+      if (!Number.isNaN(cityId)) setSelectedId(cityId);
+    }
+  }, [meta, loadPlace]);
 
   const handleSelectPlace = useCallback(
     (g: GeocodeResult) => {
@@ -229,10 +297,21 @@ export default function Dashboard() {
     }
   }, [value, loadSnapshot, loadPlace]);
 
+  // Copy the current shareable URL (already kept in sync) to the clipboard.
+  const handleShare = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1600);
+    } catch {
+      /* clipboard blocked — the URL is still shareable from the address bar */
+    }
+  }, []);
+
   if (error) {
     return <SetupNotice message={error} />;
   }
-
   if (!meta) {
     return (
       <div className="flex h-screen items-center justify-center text-slate-400">
@@ -260,6 +339,7 @@ export default function Dashboard() {
           stormMode={stormView}
           selectedStorm={selectedStorm}
           stormTrack={stormTrack}
+          windMode={windMode}
         />
       </div>
 
@@ -318,6 +398,26 @@ export default function Dashboard() {
         >
           <span>🌪️</span>
           Storm View
+        </button>
+        <button
+          onClick={() => setWindMode((v) => !v)}
+          title="Toggle the animated wind-flow overlay"
+          className={`glass pointer-events-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs transition-colors ${
+            windMode
+              ? "bg-sky-500/20 text-sky-200 border border-sky-500/30 font-bold"
+              : "text-slate-200 hover:text-white"
+          }`}
+        >
+          <span>💨</span>
+          Wind
+        </button>
+        <button
+          onClick={handleShare}
+          title="Copy a shareable link to this exact view"
+          className="glass pointer-events-auto flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs text-slate-200 hover:text-white"
+        >
+          <span>{copied ? "✓" : "🔗"}</span>
+          {copied ? "Copied!" : "Share"}
         </button>
         <button
           onClick={handleRefresh}
